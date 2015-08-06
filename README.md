@@ -1,3 +1,4 @@
+# Show, attend and tell에 데이터 구축 코드 포함시키고, 한글 주석 달아놓은 것.
 # arctic-captions
 
 Source code for [Show, Attend and Tell: Neural Image Caption Generation with Visual Attention](http://arxiv.org/abs/1502.03044)
