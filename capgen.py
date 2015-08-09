@@ -355,6 +355,8 @@ def lstm_cond_layer(tparams, state_below, options, prefix='lstm',
         init_memory = tensor.alloc(0., n_samples, dim)
 
     # projected context
+    # context: [#samples, #annotations, ctx_dim]
+    # decoder_Wc_att: [ctx_dim, ctx_dim]
     pctx_ = tensor.dot(context, tparams[_p(prefix,'Wc_att')]) + tparams[_p(prefix, 'b_att')]
     if options['n_layers_att'] > 1:
         for lidx in xrange(1, options['n_layers_att']):
@@ -366,6 +368,8 @@ def lstm_cond_layer(tparams, state_below, options, prefix='lstm',
     # projected x
     # state_below is timesteps*num samples by d in training (TODO change to notation of paper)
     # this is n * d during sampling
+# state_below : [timestep, #samples, dim]
+# decoder_W: [dim_word, dim*4]
     state_below = tensor.dot(state_below, tparams[_p(prefix, 'W')]) + tparams[_p(prefix, 'b')]
 
     # additional parameters for stochastic hard attention
@@ -391,23 +395,28 @@ def lstm_cond_layer(tparams, state_below, options, prefix='lstm',
         # attention computation
         # [described in  equations (4), (5), (6) in
         # section "3.1.2 Decoder: Long Short Term Memory Network]
-        pstate_ = tensor.dot(h_, tparams[_p(prefix,'Wd_att')])
+        pstate_ = tensor.dot(h_, tparams[_p(prefix,'Wd_att')]) # h_ : [dim], Wd_att: [dim, ctx_dim]
         pctx_ = pctx_ + pstate_[:,None,:]
         pctx_list = []
         pctx_list.append(pctx_)
         pctx_ = tanh(pctx_)
-        alpha = tensor.dot(pctx_, tparams[_p(prefix,'U_att')])+tparams[_p(prefix, 'c_tt')]
+        alpha = tensor.dot(pctx_, tparams[_p(prefix,'U_att')])+tparams[_p(prefix, 'c_att')]
         alpha_pre = alpha
         alpha_shp = alpha.shape
 
         if options['attn_type'] == 'deterministic':
             alpha = tensor.nnet.softmax(alpha.reshape([alpha_shp[0],alpha_shp[1]])) # softmax
-            ctx_ = (context * alpha[:,:,None]).sum(1) # current context
+            # alpha: (n_samples, 196)
+            ctx_ = (context * alpha[:,:,None]).sum(1) # current context 모든 포지션의 영향력 더함
             alpha_sample = alpha # you can return something else reasonable here to debug
         else:
             alpha = tensor.nnet.softmax(temperature_c*alpha.reshape([alpha_shp[0],alpha_shp[1]])) # softmax
             # TODO return alpha_sample
             if sampling:
+                # semi_sampling_p (0.5)의 확률로 h_sampling_mask = 1.
+                # h_sampling_mask = 1이면 alpha중에 하나만 1, 나머지 0
+                # h_sampling_mask = 0이면 alpha_sample = alpha
+                # trng.multinomial(pval) : pvals = [[.98, .01, .01], [.01, .98, .01]] will probably result in [[1,0,0],[0,1,0]].
                 alpha_sample = h_sampling_mask * trng.multinomial(pvals=alpha,dtype=theano.config.floatX)\
                                + (1.-h_sampling_mask) * alpha
             else:
@@ -492,14 +501,22 @@ def lstm_cond_layer(tparams, state_below, options, prefix='lstm',
                 rval = _step0(mask, state_below, init_state, init_memory, None, None, None, pctx_)
         return rval
     else:
-        seqs = [mask, state_below]
+        seqs = [mask, state_below] # 각각 _step함수에서 m_, x_에 대응
         if options['use_dropout_lstm']:
             seqs += [dp_mask]
-        outputs_info = [init_state,
-                        init_memory,
-                        tensor.alloc(0., n_samples, pctx_.shape[1]),
-                        tensor.alloc(0., n_samples, pctx_.shape[1]),
-                        tensor.alloc(0., n_samples, context.shape[2])]
+
+#    def _step(m_, x_, h_, c_, a_, as_, ct_, pctx_, dp_=None, dp_att_=None):
+#        """ Each variable is one time slice of the LSTM
+#        m_ - (mask), x_- (previous word), h_- (hidden state), c_- (lstm memory),
+#        a_ - (alpha distribution [eq (5)]), as_- (sample from alpha dist), ct_- (context),
+#        pctx_ (projected context), dp_/dp_att_ (dropout masks)
+#        """
+
+        outputs_info = [init_state, # step 함수에서 h_
+                        init_memory,# c_
+                        tensor.alloc(0., n_samples, pctx_.shape[1]), # a_ (alpha) : (n_samples, 196)
+                        tensor.alloc(0., n_samples, pctx_.shape[1]), # as_ (alpha sample): (n_samples, 196)
+                        tensor.alloc(0., n_samples, context.shape[2])] # ct_ (context): (n_samples, 512)
         if options['selector']:
             outputs_info += [tensor.alloc(0., n_samples)]
         outputs_info += [None,
@@ -528,6 +545,8 @@ ctx_dim: 512차원은 14x14개의 conv5 feature 중 1개 의미 =>
 
     - lstm_encoder를 사용하지 않으면 image feature 그 자체를 사용.
 
+ff: memory cell과 hidden의 초기값 결정하는 부분도 MLP로 학습
+
 dim_word: dim of semantic vector
 '''
 def init_params(options):
@@ -547,6 +566,8 @@ def init_params(options):
     # init_state, init_cell: [top right on page 4]
     for lidx in xrange(1, options['n_layers_init']):
         params = get_layer('ff')[0](options, params, prefix='ff_init_%d'%lidx, nin=ctx_dim, nout=ctx_dim)
+        # image -> hidden으로 가는 weight도 학습?
+
     params = get_layer('ff')[0](options, params, prefix='ff_state', nin=ctx_dim, nout=options['dim'])
     params = get_layer('ff')[0](options, params, prefix='ff_memory', nin=ctx_dim, nout=options['dim'])
     # decoder: LSTM: [equation (1)/(2)/(3)]
@@ -616,7 +637,7 @@ def build_model(tparams, options, sampling=True):
     # description string: #words x #samples,
     x = tensor.matrix('x', dtype='int64')
     mask = tensor.matrix('mask', dtype='float32')
-    # context: #samples x #annotations x dim
+    # context: #samples x #annotations x dim = [n_samples X 14*14 X 512]
     ctx = tensor.tensor3('ctx', dtype='float32')
 
     n_timesteps = x.shape[0]
@@ -650,6 +671,8 @@ def build_model(tparams, options, sampling=True):
     # lstm decoder
     # [equation (1), (2), (3) in section 3.1.2]
     attn_updates = []
+
+# proj: [h, c, alpha, alpha_sample, ctx_, pstate_ ( dot(h[t-1], Wd_att)), pctx_, i, f, o, preact, alpha_pre, alpha[t-1]], pctx_list ( pctx_를 time에 따라 계속 append한 것)
     proj, updates = get_layer('lstm_cond')[1](tparams, emb, options,
                                               prefix='decoder',
                                               mask=mask, context=ctx0,
@@ -782,6 +805,8 @@ def build_sampler(tparams, options, use_noise, trng, sampling=True):
             init_memory.append(tensor.matrix('init_memory', dtype='float32'))
 
     # for the first word (which is coded with -1), emb should be all zero
+# tensor.switch(cond, x, y): cond에 부합하면 x, 아니면 y를 선택
+
     emb = tensor.switch(x[:,None] < 0, tensor.alloc(0., 1, tparams['Wemb'].shape[1]),
                         tparams['Wemb'][x])
 
