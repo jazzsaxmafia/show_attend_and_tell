@@ -739,6 +739,7 @@ def build_model(tparams, options, sampling=True):
     p_flat = probs.flatten()# p_flat:[01000000   0000010000    000000010000   0010000 ....]
                             #        |n_words|
                             # x_flat_shape[0] : 각 단어들, prob.shape[1]: n_words, x_flat: vocab내 단어 index
+
     cost = -tensor.log(p_flat[tensor.arange(x_flat.shape[0])*probs.shape[1]+x_flat]+1e-8)
     cost = cost.reshape([x.shape[0], x.shape[1]])
     masked_cost = cost * mask

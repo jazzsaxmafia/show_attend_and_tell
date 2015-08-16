@@ -56,6 +56,9 @@ docs/_build/
 
 # PyBuilder
 target/
+<<<<<<< HEAD
 
 #feature
 feat/
+=======
+>>>>>>> c34ff93f727619d5b237b2558eaac3d36a4c61c5
