@@ -1260,6 +1260,9 @@ def train(dim_word=100,  # word vector dimensionality
     lr = tensor.scalar(name='lr')
     f_grad_shared, f_update = eval(optimizer)(lr, tparams, grads, inps, cost, hard_attn_updates)
 
+    import ipdb
+    ipdb.set_trace()
+
     print 'Optimization'
 
     # [See note in section 4.3 of paper]

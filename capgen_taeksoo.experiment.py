@@ -14,10 +14,18 @@ from keras.preprocessing import sequence
 from keras.layers.embeddings import Embedding
 from keras.layers.core import Dense
 from keras.utils.theano_utils import shared_scalar, shared_zeros, alloc_zeros_matrix
+
+trng = RandomStreams(1234)
+def dropout(X):
+    if train:
+        X *= trng.binomial(X.shape, p=0.5, dtype=theano.config.floatX)
+        X /= 0.5
+
+    return X
+
 ############# Building Models ################
 class Main_model():
     def __init__(self, n_vocab, dim_word, dim_ctx, dim):
-        self.trng = RandomStreams(1234)
         self.n_vocab = n_vocab
         self.dim_word = dim_word
         self.dim_ctx = dim_ctx
@@ -62,6 +70,14 @@ class Main_model():
                        self.U_att, self.c_att,
                        self.decode_lstm_W, self.decode_lstm_b,
                        self.decode_word_W, self.decode_word_b]
+
+        self.param_names = ['Wemb', 'Init_state_W', 'Init_state_b',
+                            'Init_memory_W', 'Init_memory_b',
+                            'lstm_W', 'lstm_U', 'lstm_b',
+                            'Wc', 'Wc_att', 'Wd_att', 'b_att',
+                            'U_att', 'c_att',
+                            'decode_lstm_W', 'decode_lstm_b',
+                            'decode_word_W', 'decode_word_b']
 
 
     def get_initial_lstm(self, ctx_mean):
@@ -167,15 +183,18 @@ class Main_model():
         initial_state, initial_memory = self.get_initial_lstm(ctx.mean(axis=1))
 
         emb = self.Wemb[x] # (n_samples, n_timesteps, dim_word)
+        emb = emb.dimshuffle(1,0,2) # (n_timesteps, n_samples, dim_word)
+
         emb_shifted = T.zeros_like(emb)
         emb_shifted = T.set_subtensor(emb_shifted[1:], emb[:-1]) # 맨 앞에 0을 padding함. 예측해야되니까
         emb = emb_shifted
 
-        emb = emb.dimshuffle(1,0,2) # (n_timesteps, n_samples, dim_word)
+        emb = dropout(emb)
 
         rval = self.forward_lstm(ctx, emb, mask, initial_state, initial_memory)
 
         hiddens, cells, alphas, alpha_samples, weighted_ctxs = rval
+        hiddens = dropout(hiddens)
 
         decoded_word_vec = T.dot(hiddens, self.decode_lstm_W) + self.decode_lstm_b
         decoded_word_vec = T.tanh(decoded_word_vec)
@@ -186,7 +205,7 @@ class Main_model():
 
         x_flat = x.flatten() # x_flat: [1   27  39  10  ...]
         p_flat = probs.flatten() # p_flat: [1 => 0100000..., 27 => 00000...1000..., 39 => 00000...00100...] 이런식
-        cost = -T.log(p_flat[T.arange(x_flat.shape[0])*probs.shape[1] + x_flat] + 1e-8)
+        cost = -T.log(p_flat[T.arange(x_flat.shape[0])*probs.shape[1] + x_flat] + 1e-5)
         # x_flat.shape[0] : n_samples * n_timesteps. arange()하니까 (0 ~ n_samples*n_timesteps - 1)
         # probs.shape[1] : n_vocab
 
@@ -194,7 +213,7 @@ class Main_model():
         masked_cost = cost * mask
         cost = (masked_cost).sum(1)
 
-        return x, mask, ctx, alphas, alpha_samples, cost
+        return x, mask, ctx, alphas, alpha_samples, cost, masked_cost
 
     def build_sampling_function(self):
         ctx = T.matrix()
@@ -232,7 +251,7 @@ class Main_model():
         decoded_word = T.dot(decoded_word_vec, self.decode_word_W) + self.decode_word_b
 
         next_probs = T.nnet.softmax(decoded_word)
-        next_sample = self.trng.multinomial(pvals=next_probs).argmax(1)
+        next_sample = trng.multinomial(pvals=next_probs).argmax(1)
 
         f_next = theano.function(inputs=[x, ctx, initial_state, initial_memory],
                                  outputs=[next_probs, next_sample, next_state, next_memory],
@@ -256,6 +275,13 @@ def RMSprop(cost, params, lr=0.001, rho=0.9, epsilon=1e-6):
 
     return updates
 
+def sgd(cost, params, lr=0.001):
+    grads = T.grad(cost=cost, wrt=params)
+    updates = []
+    for param, grad in zip(params, grads):
+        updates.append([param, param-grad*lr])
+    return updates
+
 def train():
 
     n_vocab = 18254
@@ -264,6 +290,7 @@ def train():
     dim = 256
     alpha_c = 0.01 # alpha의 합이 1이 되도록 regularization
     decay_c = 0.001# l2 regularization
+    n_epochs = 10
 
 
     dictionary = pd.read_pickle('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl')
@@ -273,11 +300,13 @@ def train():
 
     main_model = Main_model(n_vocab, dim_word, dim_ctx, dim)
 
-    x, mask, ctx, alphas, alpha_samples, cost = main_model.build_model()
+    x, mask, ctx, alphas, alpha_samples, cost, masked_cost = main_model.build_model()
     f_init, f_next = main_model.build_sampling_function()
 
+
+    f_cost = theano.function(inputs=[x, mask, ctx], outputs=masked_cost, allow_input_downcast=True)
     cost = cost.mean()
-    updates = RMSprop(cost=cost, params=main_model.params)
+    updates = sgd(cost=cost, params=main_model.params, lr=0.00001)
     train_function = theano.function(inputs=[x,mask,ctx],
                                      outputs=cost,
                                      updates=updates,
@@ -296,23 +325,45 @@ def train():
         weight_decay *= decay_c
         cost += weight_decay
 
+    sample_img = np.load('./sample_image.npy')
+    sample_text= np.load('./sample_text.npy')
+    sample_mask= np.load('./sample_mask.npy')
+
+    ipdb.set_trace()
+    cost = train_function(sample_text, sample_mask, sample_img)
+
     with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/flicker_30k_align.train.pkl') as f:
         sentences = cPickle.load(f)
         image_feats = cPickle.load(f)
 
     sentences, image_ids = zip(*sentences)
 
-    for start, end in zip(range(0, len(sentences)+10), range(10, len(sentences)+10, 10)):
-        current_sents = sentences[start:end]
-        current_sent_ind = map(lambda sent: map(lambda word: dictionary[word] if word in dictionary else None, sent.lower().split(' ')), current_sents)
-        current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
-        current_img_id = image_ids[start:end]
+    for epoch in range(n_epochs):
 
-        current_feats = image_feats[np.array(current_img_id)]
-        feat_train = np.array(current_feats.todense()).reshape(-1,196,512)
+        for start, end in zip(range(0, len(sentences)+10), range(10, len(sentences)+10, 10)):
+            current_sents = sentences[start:end]
+            current_sent_ind = map(lambda sent: map(lambda word: dictionary[word] if word in dictionary else None, sent.lower().split(' ')), current_sents)
+            current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
+            current_img_id = image_ids[start:end]
 
-        X_train = sequence.pad_sequences(current_sent_ind, padding='post')
-        mask_train = np.ones_like(X_train) * (1 - np.equal(X_train, 0))
+            maxlen = np.max(map(lambda x: len(x), current_sent_ind)) + 1
 
-        cost = train_function(X_train, mask_train,feat_train)
+            current_feats = image_feats[np.array(current_img_id)]
+            feat_train = np.array(current_feats.todense()).reshape(-1,196,512)
+
+            X_train = sequence.pad_sequences(current_sent_ind, padding='post', maxlen=maxlen)
+            mask_train = np.zeros_like(X_train)# * (1 - np.equal(X_train, 0))
+
+            nonzeros = np.array(map(lambda x: (x != 0).sum(), X_train))
+
+            for ind,row in enumerate(mask_train):
+                row[:nonzeros[ind]+1] = 1
+
+
+            cost = train_function(X_train, mask_train,feat_train)
+            print cost
+
+        for name, param in zip(main_model.param_names, main_model.params):
+            np.save('./cv/iter_'+str(epoch)+'_'+name, param)
+
 
