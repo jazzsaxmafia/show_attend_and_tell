@@ -18,9 +18,6 @@ from keras.utils.theano_utils import shared_scalar, shared_zeros, alloc_zeros_ma
 class Main_model():
     def __init__(self, n_vocab, dim_word, dim_ctx, dim):
         self.trng = RandomStreams(1234)
-        self.x = T.imatrix() # (n_samples, n_timesteps)
-        self.mask = T.matrix(dtype='float32') # (n_samples, n_timesteps)
-        self.ctx = T.tensor3(dtype='float32') # (n_samples, 196, 512)
         self.n_vocab = n_vocab
         self.dim_word = dim_word
         self.dim_ctx = dim_ctx
@@ -162,16 +159,21 @@ class Main_model():
         return rval
 
     def build_model(self):
-        initial_state, initial_memory = self.get_initial_lstm(self.ctx.mean(axis=1))
 
-        emb = self.Wemb[self.x] # (n_samples, n_timesteps, dim_word)
+        x = T.imatrix() # (n_samples, n_timesteps)
+        mask = T.matrix(dtype='float32') # (n_samples, n_timesteps)
+        ctx = T.tensor3(dtype='float32') # (n_samples, 196, 512)
+
+        initial_state, initial_memory = self.get_initial_lstm(ctx.mean(axis=1))
+
+        emb = self.Wemb[x] # (n_samples, n_timesteps, dim_word)
         emb_shifted = T.zeros_like(emb)
         emb_shifted = T.set_subtensor(emb_shifted[1:], emb[:-1]) # 맨 앞에 0을 padding함. 예측해야되니까
         emb = emb_shifted
 
         emb = emb.dimshuffle(1,0,2) # (n_timesteps, n_samples, dim_word)
 
-        rval = self.forward_lstm(self.ctx, emb, self.mask, initial_state, initial_memory)
+        rval = self.forward_lstm(ctx, emb, mask, initial_state, initial_memory)
 
         hiddens, cells, alphas, alpha_samples, weighted_ctxs = rval
 
@@ -182,17 +184,17 @@ class Main_model():
         decoded_word_shape = decoded_word.shape
         probs = T.nnet.softmax(decoded_word.reshape([decoded_word_shape[0]*decoded_word_shape[1], decoded_word_shape[2]]))
 
-        x_flat = self.x.flatten() # x_flat: [1   27  39  10  ...]
+        x_flat = x.flatten() # x_flat: [1   27  39  10  ...]
         p_flat = probs.flatten() # p_flat: [1 => 0100000..., 27 => 00000...1000..., 39 => 00000...00100...] 이런식
         cost = -T.log(p_flat[T.arange(x_flat.shape[0])*probs.shape[1] + x_flat] + 1e-8)
         # x_flat.shape[0] : n_samples * n_timesteps. arange()하니까 (0 ~ n_samples*n_timesteps - 1)
         # probs.shape[1] : n_vocab
 
-        cost = cost.reshape([self.x.shape[0], self.x.shape[1]])
-        masked_cost = cost * self.mask
+        cost = cost.reshape([x.shape[0], x.shape[1]])
+        masked_cost = cost * mask
         cost = (masked_cost).sum(1)
 
-        return self.x, self.mask, self.ctx, alphas, alpha_samples, cost
+        return x, mask, ctx, alphas, alpha_samples, cost
 
     def build_sampling_function(self):
         ctx = T.matrix()
@@ -260,6 +262,9 @@ def train():
     dim_word = 256
     dim_ctx = 512
     dim = 256
+    alpha_c = 0.01 # alpha의 합이 1이 되도록 regularization
+    decay_c = 0.001# l2 regularization
+
 
     dictionary = pd.read_pickle('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl')
     dictionary[0] = '#START#'
@@ -278,15 +283,24 @@ def train():
                                      updates=updates,
                                      allow_input_downcast=True)
 
+    if alpha_c > 0.:
+        alpha_c = theano.shared(np.float32(alpha_c))
+        alpha_reg = alpha_c * ((1. - alphas.sum(axis=0))**2).sum(axis=0).mean()
+        cost += alpha_reg
+
+    if decay_c > 0.:
+        decay_c = theano.shared(np.float32(decay_c))
+        weight_decay = 0.
+        for p in main_model.params:
+            weight_decay += (p ** 2).sum()
+        weight_decay *= decay_c
+        cost += weight_decay
 
     with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/flicker_30k_align.train.pkl') as f:
         sentences = cPickle.load(f)
         image_feats = cPickle.load(f)
 
     sentences, image_ids = zip(*sentences)
-
-#X_train = sequence.pad_sequences(sent_to_num, padding='post')
-#mask_train = np.ones_like(X_train) * (1 - np.equal(X_train, 0))
 
     for start, end in zip(range(0, len(sentences)+10), range(10, len(sentences)+10, 10)):
         current_sents = sentences[start:end]
@@ -301,5 +315,4 @@ def train():
         mask_train = np.ones_like(X_train) * (1 - np.equal(X_train, 0))
 
         cost = train_function(X_train, mask_train,feat_train)
-        ipdb.set_trace()
 
