@@ -75,12 +75,12 @@ class Main_model():
         self.decode_word_W = initializations.uniform((self.dim_word, n_vocab))
         self.decode_word_b = shared_zeros((n_vocab))
 
-        self.params = [#self.Wemb,
-#                       self.Init_state_W, self.Init_state_b,
-#                       self.Init_memory_W, self.Init_memory_b,
-#                       self.lstm_W, self.lstm_U, self.lstm_b,
-#                       self.Wc, self.Wc_att, self.Wd_att, self.b_att,
-#                       self.U_att, self.c_att,
+        self.params = [self.Wemb,
+                       self.Init_state_W, self.Init_state_b,
+                       self.Init_memory_W, self.Init_memory_b,
+                       self.lstm_W, self.lstm_U, self.lstm_b,
+                       self.Wc, self.Wc_att, self.Wd_att, self.b_att,
+                       self.U_att, self.c_att,
                        self.decode_lstm_W, self.decode_lstm_b,
                        self.decode_word_W, self.decode_word_b]
 
