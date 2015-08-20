@@ -13,7 +13,9 @@ from keras import activations, initializations
 from keras.preprocessing import sequence
 from keras.layers.embeddings import Embedding
 from keras.layers.core import Dense
-from keras.utils.theano_utils import shared_scalar, shared_zeros, alloc_zeros_matrix
+from keras.utils.theano_utils import shared_scalar, shared_zeros, sharedX, alloc_zeros_matrix
+
+from theano import config
 
 trng = RandomStreams(1234)
 def dropout(X):
@@ -22,6 +24,13 @@ def dropout(X):
         X /= 0.5
 
     return X
+
+def ortho_weight(ndim):
+
+    W = np.random.randn(ndim, ndim)
+    u, _, _ = np.linalg.svd(W)
+    return u.astype('float32')
+
 
 ############# Building Models ################
 class Main_model():
@@ -44,7 +53,11 @@ class Main_model():
 
         ### Main LSTM ###
         self.lstm_W = initializations.uniform((self.dim_word, self.dim * 4))
-        self.lstm_U = initializations.uniform((self.dim, self.dim*4))
+        self.lstm_U = sharedX(np.concatenate([ortho_weight(dim),
+                                      ortho_weight(dim),
+                                      ortho_weight(dim),
+                                      ortho_weight(dim)], axis=1))
+
         self.lstm_b = shared_zeros((self.dim*4))
 
         self.Wc = initializations.uniform((self.dim_ctx, self.dim*4)) # image -> LSTM hidden
@@ -62,12 +75,12 @@ class Main_model():
         self.decode_word_W = initializations.uniform((self.dim_word, n_vocab))
         self.decode_word_b = shared_zeros((n_vocab))
 
-        self.params = [self.Wemb,
-                       self.Init_state_W, self.Init_state_b,
-                       self.Init_memory_W, self.Init_memory_b,
-                       self.lstm_W, self.lstm_U, self.lstm_b,
-                       self.Wc, self.Wc_att, self.Wd_att, self.b_att,
-                       self.U_att, self.c_att,
+        self.params = [#self.Wemb,
+#                       self.Init_state_W, self.Init_state_b,
+#                       self.Init_memory_W, self.Init_memory_b,
+#                       self.lstm_W, self.lstm_U, self.lstm_b,
+#                       self.Wc, self.Wc_att, self.Wd_att, self.b_att,
+#                       self.U_att, self.c_att,
                        self.decode_lstm_W, self.decode_lstm_b,
                        self.decode_word_W, self.decode_word_b]
 
@@ -109,7 +122,7 @@ class Main_model():
                 return _x[:,:,n*dim:(n+1)*dim]
             return _x[:, n*dim:(n+1)*dim]
 
-        def _step(m_tm_1, x_t, h_tm_1, c_tm_1, alpha_tm_1, alpha_sample_tm_1, weighed_ctx_tm_1):
+        def _step(m_tm_1, x_t, h_tm_1, c_tm_1, alpha_tm_1, alpha_sample_tm_1):
 
             # m_tm_1 : (n_samples, 1)
             # x_t : (n_samples, dim)
@@ -128,7 +141,7 @@ class Main_model():
             alpha_shape = alpha.shape
 
             # 귀찮으니 일단 deterministic attention만 구현한다
-            alpha = T.nnet.softmax(alpha.reshape([alpha_shape[0], alpha_shape[1]])) # 마지막 dimension 없앰
+            alpha = softmax(alpha.reshape([alpha_shape[0], alpha_shape[1]])) # 마지막 dimension 없앰
             weighted_ctx = (ctx * alpha[:,:,None]).sum(1) # (n_samples, 196, 512) * (n_samples, 196, 1)
             alpha_sample = alpha
 
@@ -149,36 +162,36 @@ class Main_model():
 
         X_t = T.dot(emb, self.lstm_W) + self.lstm_b # (n_timesteps, n_samples, dim*4)
 
-        alpha_init = T.alloc(0., n_samples, ctx.shape[-2]) # (n_samples, 196)
-        alpha_sample_init = T.alloc(0., n_samples, ctx.shape[-2]) # (n_samples, 196)
-        weighted_ctx_init = T.alloc(0., n_samples, ctx.shape[-1]) # (n_samples, 512)
+        alpha_init = T.alloc(0., n_samples, ctx.shape[1]) # (n_samples, 196)
+        alpha_sample_init = T.alloc(0., n_samples, ctx.shape[1]) # (n_samples, 196)
+        #weighted_ctx_init = T.alloc(0., n_samples, ctx.shape[-1]) # (n_samples, 512)
 
         sequences = [mask_shuffled, X_t]
 
         if one_step:
-            rval = _step(mask_shuffled, X_t, initial_state, initial_memory, None, None, None)
+            rval = _step(mask_shuffled, X_t, initial_state, initial_memory, None, None)
 
         else:
+
             outputs_info = [
                 initial_state,
                 initial_memory,
                 alpha_init,
                 alpha_sample_init,
-                weighted_ctx_init
+                None
                 ]
 
             rval, updates = theano.scan(_step,
                                         sequences=sequences,
                                         outputs_info=outputs_info)
-                                        #n_steps=n_timesteps)
 
         return rval
 
     def build_model(self):
 
-        x = T.imatrix() # (n_samples, n_timesteps)
-        mask = T.matrix(dtype='float32') # (n_samples, n_timesteps)
-        ctx = T.tensor3(dtype='float32') # (n_samples, 196, 512)
+        x = T.imatrix('x') # (n_samples, n_timesteps)
+        mask = T.matrix('mask',dtype='float32') # (n_samples, n_timesteps)
+        ctx = T.tensor3('ctx',dtype='float32') # (n_samples, 196, 512)
 
         initial_state, initial_memory = self.get_initial_lstm(ctx.mean(axis=1))
 
@@ -189,45 +202,46 @@ class Main_model():
         emb_shifted = T.set_subtensor(emb_shifted[1:], emb[:-1]) # 맨 앞에 0을 padding함. 예측해야되니까
         emb = emb_shifted
 
-        emb = dropout(emb)
+        #emb = dropout(emb)
 
         rval = self.forward_lstm(ctx, emb, mask, initial_state, initial_memory)
 
         hiddens, cells, alphas, alpha_samples, weighted_ctxs = rval
-        hiddens = dropout(hiddens)
+        #hiddens = dropout(hiddens)
 
         decoded_word_vec = T.dot(hiddens, self.decode_lstm_W) + self.decode_lstm_b
         decoded_word_vec = T.tanh(decoded_word_vec)
         decoded_word = T.dot(decoded_word_vec, self.decode_word_W) + self.decode_word_b
 
         decoded_word_shape = decoded_word.shape
-        probs = T.nnet.softmax(decoded_word.reshape([decoded_word_shape[0]*decoded_word_shape[1], decoded_word_shape[2]]))
+        probs = softmax(decoded_word.reshape([decoded_word_shape[0]*decoded_word_shape[1], decoded_word_shape[2]]))
 
         x_flat = x.flatten() # x_flat: [1   27  39  10  ...]
         p_flat = probs.flatten() # p_flat: [1 => 0100000..., 27 => 00000...1000..., 39 => 00000...00100...] 이런식
-        cost = -T.log(p_flat[T.arange(x_flat.shape[0])*probs.shape[1] + x_flat] + 1e-5)
+        cost = -T.log(p_flat[T.arange(x_flat.shape[0])*probs.shape[1] + x_flat] + 1e-8)
         # x_flat.shape[0] : n_samples * n_timesteps. arange()하니까 (0 ~ n_samples*n_timesteps - 1)
         # probs.shape[1] : n_vocab
 
         cost = cost.reshape([x.shape[0], x.shape[1]])
         masked_cost = cost * mask
-        cost = (masked_cost).sum(1)
+        #cost = (masked_cost).sum(0)
+        cost = (masked_cost).sum() / mask.sum()
 
-        return x, mask, ctx, alphas, alpha_samples, cost, masked_cost
+        return x, mask, ctx, alphas, alpha_samples, cost, rval#, masked_cost
 
     def build_sampling_function(self):
-        ctx = T.matrix()
+        ctx = T.matrix('ctx')
 
         initial_state, initial_memory = self.get_initial_lstm(ctx.mean(axis=0))
         f_init = theano.function(inputs=[ctx],
                                  outputs=[ctx, initial_state, initial_memory])
 
-        ctx = T.matrix()
-        x = T.ivector()
+        ctx = T.matrix('ctx')
+        x = T.ivector('x')
         emb = T.switch(x[:,None] < 0, T.alloc(0., 1, self.Wemb.shape[1]), self.Wemb[x])
 
-        initial_state = T.vector()
-        initial_memory = T.vector()
+        initial_state = T.vector('initial_state')
+        initial_memory = T.vector('initial_memory')
 
         [
             next_state,
@@ -258,6 +272,10 @@ class Main_model():
                                  allow_input_downcast=True)
 
         return f_init, f_next
+
+def softmax(X):
+    e_x = T.exp(X - X.max(axis=1).dimshuffle(0, 'x'))
+    return e_x / e_x.sum(axis=1).dimshuffle(0, 'x')
 
 
 def RMSprop(cost, params, lr=0.001, rho=0.9, epsilon=1e-6):
@@ -300,17 +318,17 @@ def train():
 
     main_model = Main_model(n_vocab, dim_word, dim_ctx, dim)
 
-    x, mask, ctx, alphas, alpha_samples, cost, masked_cost = main_model.build_model()
+    x, mask, ctx, alphas, alpha_samples, cost, rval = main_model.build_model()
     f_init, f_next = main_model.build_sampling_function()
 
+    #cost = cost.mean()
 
-    f_cost = theano.function(inputs=[x, mask, ctx], outputs=masked_cost, allow_input_downcast=True)
-    cost = cost.mean()
-    updates = sgd(cost=cost, params=main_model.params, lr=0.00001)
+    updates = sgd(cost=cost, params=main_model.params, lr=0.001)
     train_function = theano.function(inputs=[x,mask,ctx],
                                      outputs=cost,
                                      updates=updates,
-                                     allow_input_downcast=True)
+                                     allow_input_downcast=True,
+                                     )
 
     if alpha_c > 0.:
         alpha_c = theano.shared(np.float32(alpha_c))
@@ -325,13 +343,6 @@ def train():
         weight_decay *= decay_c
         cost += weight_decay
 
-    sample_img = np.load('./sample_image.npy')
-    sample_text= np.load('./sample_text.npy')
-    sample_mask= np.load('./sample_mask.npy')
-
-    ipdb.set_trace()
-    cost = train_function(sample_text, sample_mask, sample_img)
-
     with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/flicker_30k_align.train.pkl') as f:
         sentences = cPickle.load(f)
         image_feats = cPickle.load(f)
@@ -340,7 +351,7 @@ def train():
 
     for epoch in range(n_epochs):
 
-        for start, end in zip(range(0, len(sentences)+10), range(10, len(sentences)+10, 10)):
+        for start, end in zip(range(0, len(sentences)+8), range(8, len(sentences)+8, 8)):
             current_sents = sentences[start:end]
             current_sent_ind = map(lambda sent: map(lambda word: dictionary[word] if word in dictionary else None, sent.lower().split(' ')), current_sents)
             current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
@@ -358,7 +369,6 @@ def train():
 
             for ind,row in enumerate(mask_train):
                 row[:nonzeros[ind]+1] = 1
-
 
             cost = train_function(X_train, mask_train,feat_train)
             print cost
