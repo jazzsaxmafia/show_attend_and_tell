@@ -3,6 +3,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 import pandas as pd
 import numpy as np
+import os
 import theano
 import theano.tensor as T
 import ipdb
@@ -16,6 +17,7 @@ from keras.layers.core import Dense
 from keras.utils.theano_utils import shared_scalar, shared_zeros, sharedX, alloc_zeros_matrix
 
 from theano import config
+from taeksoo.cnn_util import *
 
 trng = RandomStreams(1234)
 def dropout(X):
@@ -122,7 +124,7 @@ class Main_model():
                 return _x[:,:,n*dim:(n+1)*dim]
             return _x[:, n*dim:(n+1)*dim]
 
-        def _step(m_tm_1, x_t, h_tm_1, c_tm_1, alpha_tm_1, alpha_sample_tm_1):
+        def _step(m_tm_1, x_t, h_tm_1, c_tm_1, alpha_tm_1, alpha_sample_tm_1, pctx):
 
             # m_tm_1 : (n_samples, 1)
             # x_t : (n_samples, dim)
@@ -134,7 +136,7 @@ class Main_model():
             # 근데 사실상 함수 내에서 쓰이는 변수는 m_tm_1, x_t, h_tm_1, c_tm_1 뿐임.
             # 나머지는 그냥 각 step마다 return만 됨. (outputs_info에 포함되어 있어서 강제로 input에 포함)
 
-            projected_ctx =  T.dot(ctx, self.Wc_att) + T.dot(h_tm_1, self.Wd_att)[:,None,:] + self.b_att # (n_samples, 196, 512)
+            projected_ctx = pctx + T.dot(h_tm_1, self.Wd_att)[:,None,:] + self.b_att # (n_samples, 196, 512)
             projected_ctx = T.tanh(projected_ctx)
 
             alpha = T.dot(projected_ctx, self.U_att) + self.c_att # (n_samples, 196, 1)
@@ -160,16 +162,16 @@ class Main_model():
 
             return [h, c, alpha, alpha_sample, weighted_ctx]
 
+        projected_ctx = T.dot(ctx, self.Wc_att)
         X_t = T.dot(emb, self.lstm_W) + self.lstm_b # (n_timesteps, n_samples, dim*4)
 
         alpha_init = T.alloc(0., n_samples, ctx.shape[1]) # (n_samples, 196)
         alpha_sample_init = T.alloc(0., n_samples, ctx.shape[1]) # (n_samples, 196)
-        #weighted_ctx_init = T.alloc(0., n_samples, ctx.shape[-1]) # (n_samples, 512)
 
         sequences = [mask_shuffled, X_t]
 
         if one_step:
-            rval = _step(mask_shuffled, X_t, initial_state, initial_memory, None, None)
+            rval = _step(mask_shuffled, X_t, initial_state, initial_memory, None, None, projected_ctx)
 
         else:
 
@@ -183,7 +185,8 @@ class Main_model():
 
             rval, updates = theano.scan(_step,
                                         sequences=sequences,
-                                        outputs_info=outputs_info)
+                                        outputs_info=outputs_info,
+                                        non_sequences=[projected_ctx])
 
         return rval
 
@@ -302,13 +305,20 @@ def sgd(cost, params, lr=0.001):
 
 def train():
 
+    annotation_path = '/home/taeksoo/Study/Multimodal/dataset/flickr30/results_20130124.token'
+    flickr_image_path = '/home/taeksoo/Study/Multimodal/dataset/flickr30/flickr30k-images'
+
     n_vocab = 18254
-    dim_word = 256
-    dim_ctx = 512
-    dim = 256
+    dim_word = 128
+    dim_ctx = 256
+    dim = 128
     alpha_c = 0.01 # alpha의 합이 1이 되도록 regularization
     decay_c = 0.001# l2 regularization
     n_epochs = 10
+
+    cnn = CNN(batch_size=20,
+              width=227,
+              height=227)
 
 
     dictionary = pd.read_pickle('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl')
@@ -323,7 +333,7 @@ def train():
 
     #cost = cost.mean()
 
-    updates = sgd(cost=cost, params=main_model.params, lr=0.001)
+    updates = sgd(cost=cost, params=main_model.params, lr=0.005)
     train_function = theano.function(inputs=[x,mask,ctx],
                                      outputs=cost,
                                      updates=updates,
@@ -343,24 +353,22 @@ def train():
         weight_decay *= decay_c
         cost += weight_decay
 
-    with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/flicker_30k_align.train.pkl') as f:
-        sentences = cPickle.load(f)
-        image_feats = cPickle.load(f)
-
-    sentences, image_ids = zip(*sentences)
+    annotations = pd.read_table(annotation_path, sep='\t', header=None, names=['image', 'caption'])
+    annotations['image'] = annotations['image'].map(lambda x: os.path.join(flickr_image_path,x.split('#')[0]))
+    images = annotations['image'].values
+    captions = annotations['caption'].values
 
     for epoch in range(n_epochs):
 
-        for start, end in zip(range(0, len(sentences)+8), range(8, len(sentences)+8, 8)):
-            current_sents = sentences[start:end]
+        for start, end in zip(range(0, len(images)+100, 100), range(100, len(images)+100, 100)):
+            current_sents = captions[start:end]
             current_sent_ind = map(lambda sent: map(lambda word: dictionary[word] if word in dictionary else None, sent.lower().split(' ')), current_sents)
             current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
-            current_img_id = image_ids[start:end]
+
+            current_imgs = images[start:end]
+            current_feats = cnn.get_features(current_imgs, layers='conv5', layer_sizes=[256,13,13]).reshape(-1, 256, 169).swapaxes(1,2)
 
             maxlen = np.max(map(lambda x: len(x), current_sent_ind)) + 1
-
-            current_feats = image_feats[np.array(current_img_id)]
-            feat_train = np.array(current_feats.todense()).reshape(-1,196,512)
 
             X_train = sequence.pad_sequences(current_sent_ind, padding='post', maxlen=maxlen)
             mask_train = np.zeros_like(X_train)# * (1 - np.equal(X_train, 0))
@@ -368,10 +376,13 @@ def train():
             nonzeros = np.array(map(lambda x: (x != 0).sum(), X_train))
 
             for ind,row in enumerate(mask_train):
-                row[:nonzeros[ind]+1] = 1
+                row[:nonzeros[ind]+2] = 1
+                X_train[ind, nonzeros[ind]] = 1
 
-            cost = train_function(X_train, mask_train,feat_train)
-            print cost
+            ipdb.set_trace()
+
+            cost = train_function(X_train, mask_train, current_feats)
+            print start, ':', cost
 
         for name, param in zip(main_model.param_names, main_model.params):
             np.save('./cv/iter_'+str(epoch)+'_'+name, param)

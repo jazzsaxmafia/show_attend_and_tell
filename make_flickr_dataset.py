@@ -30,14 +30,16 @@ dictionary = vectorizer.vocabulary_
 dictionary_series = pd.Series(dictionary.values(), index=dictionary.keys()) + 2
 dictionary = dictionary_series.to_dict()
 
-with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl', 'wb') as f:
-    cPickle.dump(dictionary, f)
+#with open('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl', 'wb') as f:
+#    cPickle.dump(dictionary, f)
 
 images = pd.Series(annotations['image'].unique())
 image_id_dict = pd.Series(np.array(images.index), index=images)
 
 caption_image_id = annotations['image'].map(lambda x: image_id_dict[x]).values
 cap = zip(captions, caption_image_id)
+
+ipdb.set_trace()
 
 for start, end in zip(range(0, len(images)+10000, 10000), range(10000, len(images)+10000, 10000)):
     image_files = images[start:end]
