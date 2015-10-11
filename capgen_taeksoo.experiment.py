@@ -305,25 +305,34 @@ def sgd(cost, params, lr=0.001):
 
 def train():
 
-    annotation_path = '/home/taeksoo/Study/Multimodal/dataset/flickr30/results_20130124.token'
-    flickr_image_path = '/home/taeksoo/Study/Multimodal/dataset/flickr30/flickr30k-images'
+    data_path = '/home/taeksoo/Study/show_attend_and_tell/data/flickr30k'
+    image_path = '/home/taeksoo/Study/show_attend_and_tell/images/'
+    annotation_path = os.path.join(data_path, 'results_20130124.token')
+    flickr_image_path = os.path.join(image_path, 'flickr30k-images')
+    dictionary_path = os.path.join(data_path, 'dictionary.pkl')
+    vectorizer_path = os.path.join(data_path, 'vectorizer.pkl')
 
-    n_vocab = 18254
-    dim_word = 128
+    n_vocab = 10000
+    dim_word = 256
     dim_ctx = 256
-    dim = 128
+    dim = 512
     alpha_c = 0.01 # alpha의 합이 1이 되도록 regularization
     decay_c = 0.001# l2 regularization
     n_epochs = 10
 
-    cnn = CNN(batch_size=20,
-              width=227,
-              height=227)
+    vgg_model = '/home/taeksoo/Package/caffe/models/vgg/VGG_ILSVRC_16_layers.caffemodel'
+    vgg_deploy = '/home/taeksoo/Package/caffe/models/vgg/VGG_ILSVRC_16_layers_deploy.prototxt'
+
+    cnn = CNN(
+#            deploy=vgg_deploy,
+#            model=vgg_model,
+            batch_size=20,
+            width=227,
+            height=227)
 
 
-    dictionary = pd.read_pickle('/home/taeksoo/Study/Multimodal/dataset/flickr30/dictionary.pkl')
-    dictionary[0] = '#START#'
-    dictionary[1] = '.'
+    dictionary = pd.read_pickle(dictionary_path)
+    vectorizer = pd.read_pickle(vectorizer_path)
     #n_vocab = len(dictionary)
 
     main_model = Main_model(n_vocab, dim_word, dim_ctx, dim)
@@ -362,8 +371,9 @@ def train():
 
         for start, end in zip(range(0, len(images)+100, 100), range(100, len(images)+100, 100)):
             current_sents = captions[start:end]
-            current_sent_ind = map(lambda sent: map(lambda word: dictionary[word] if word in dictionary else None, sent.lower().split(' ')), current_sents)
-            current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
+            #current_sent_ind = map(lambda sent: map(lambda word: vectorizer.transform(word) if word in vectorizer.get_feature_names() else 1, sent.lower()), current_sents)
+            current_sent_ind = map(lambda sent: np.where(vectorizer.transform(sent.split(' ')).toarray())[1], current_sents)
+            #current_sent_ind = map(lambda sent: filter(lambda word: word is not None, sent), current_sent_ind)
 
             current_imgs = images[start:end]
             current_feats = cnn.get_features(current_imgs, layers='conv5', layer_sizes=[256,13,13]).reshape(-1, 256, 169).swapaxes(1,2)
@@ -376,15 +386,17 @@ def train():
             nonzeros = np.array(map(lambda x: (x != 0).sum(), X_train))
 
             for ind,row in enumerate(mask_train):
-                row[:nonzeros[ind]+2] = 1
-                X_train[ind, nonzeros[ind]] = 1
-
-            ipdb.set_trace()
+                row[:nonzeros[ind]+1] = 1
+                #X_train[ind, nonzeros[ind]] = 1
 
             cost = train_function(X_train, mask_train, current_feats)
             print start, ':', cost
 
         for name, param in zip(main_model.param_names, main_model.params):
             np.save('./cv/iter_'+str(epoch)+'_'+name, param)
+
+
+def gen_sample(model, ctx0):
+    f_init, f_next = model.build_sampling_function()
 
 
